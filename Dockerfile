@@ -1,20 +1,34 @@
 FROM python:3.12-slim
 
-# Pinned tool versions. Unpinned installs make the image non-reproducible and
-# let an upstream release change scan results without a DockSec change.
 ARG TRIVY_VERSION=0.74.0
 ARG HADOLINT_VERSION=2.15.1
+ARG DOCKER_CLI_VERSION=27.3.1
+ARG DOCKER_GID=999
+ARG DOCKER_UID=10001
+ARG DOCKER_USER_GID=10001
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    git \
+        curl \
+        git \
+        ca-certificates \
+        gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Hadolint.
-# -f is required: without it curl exits 0 on an HTTP error and writes the error
-# page to the destination, producing a "successful" build with a text file where
-# the binary should be.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) docker_arch='x86_64' ;; \
+        arm64) docker_arch='aarch64' ;; \
+        *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/docker.tgz \
+        "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz"; \
+    tar -xzf /tmp/docker.tgz -C /tmp; \
+    mv /tmp/docker/docker /usr/local/bin/docker; \
+    chmod +x /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    docker --version
+
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -26,9 +40,6 @@ RUN set -eux; \
         "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-${hadolint_arch}"; \
     chmod +x /usr/local/bin/hadolint
 
-# Install Trivy from the release tarball rather than the install script, so the
-# download is version-addressed and a redirect or a moved script cannot silently
-# change what lands in the image.
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -41,32 +52,33 @@ RUN set -eux; \
     tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy; \
     rm -f /tmp/trivy.tar.gz
 
-# Fail the build if either tool is missing or not executable. The previous
-# install steps could fail silently, shipping an image whose every scan errored
-# with "Missing required tools: trivy".
-RUN trivy --version && hadolint --version
+RUN trivy --version && hadolint --version && docker --version
 
-# Build and install from a dedicated directory. /github/workspace is where the
-# Action mounts the user's repository, so installing there both shipped the
-# DockSec source to every user and left files that a bind mount then shadowed.
 WORKDIR /src
 COPY . .
-
-# Install DockSec with the AI extra: the image backs the GitHub Action, which
-# exposes AI analysis inputs, so a scan-only install would make those inputs fail.
 RUN pip install --no-cache-dir ".[ai]"
-
-# Fail the build if the CLI itself is not importable and runnable.
 RUN docksec --version
 
-# The Action mounts the repository being scanned here; it must start empty.
-# Leaving /src first so the build sources can be removed rather than left behind.
 WORKDIR /github/workspace
 RUN rm -rf /src
 
-# Copy and set permissions for entrypoint
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN groupadd -g ${DOCKER_USER_GID} docksec && \
+    useradd -m -u ${DOCKER_UID} -g docksec -s /sbin/nologin -c "DockSec App User" docksec
 
-# Set entrypoint
+RUN if getent group ${DOCKER_GID} >/dev/null; then \
+        existing=$(getent group ${DOCKER_GID} | cut -d: -f1); \
+        usermod -aG "$existing" docksec; \
+    else \
+        groupadd -g ${DOCKER_GID} docker_host && \
+        usermod -aG docker_host docksec; \
+    fi
+
+RUN mkdir -p /home/docksec/.docksec/results && \
+    chown -R docksec:docksec /home/docksec/.docksec
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && \
+    chown docksec:docksec /entrypoint.sh && \
+    chown -R docksec:docksec /github/workspace
+
 ENTRYPOINT ["/entrypoint.sh"]
