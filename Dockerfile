@@ -1,19 +1,14 @@
 FROM python:3.12-slim
 
-# --- Pinned tool versions (reproducible builds) ---
+# Pinned tool versions
 ARG TRIVY_VERSION=0.74.0
 ARG HADOLINT_VERSION=2.15.1
 ARG DOCKER_CLI_VERSION=27.3.1
 
-# Host docker socket GID — pass with:
-#   --build-arg DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 ARG DOCKER_GID=999
-
-# Non-root user/group IDs
 ARG DOCKER_UID=10001
 ARG DOCKER_USER_GID=10001
 
-# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
@@ -73,11 +68,9 @@ RUN docksec --version
 WORKDIR /github/workspace
 RUN rm -rf /src
 
-# Non-root user
 RUN groupadd -g ${DOCKER_USER_GID} docksec && \
     useradd -m -u ${DOCKER_UID} -g docksec -s /sbin/nologin -c "DockSec App User" docksec
 
-# Docker socket group (host GID match)
 RUN if getent group ${DOCKER_GID} >/dev/null; then \
         existing=$(getent group ${DOCKER_GID} | cut -d: -f1); \
         usermod -aG "$existing" docksec; \
@@ -86,11 +79,9 @@ RUN if getent group ${DOCKER_GID} >/dev/null; then \
         usermod -aG docker_host docksec; \
     fi
 
-# DockSec results directory
 RUN mkdir -p /home/docksec/.docksec/results && \
     chown -R docksec:docksec /home/docksec/.docksec
 
-# Entrypoint
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && \
     chown docksec:docksec /entrypoint.sh && \
