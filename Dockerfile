@@ -1,12 +1,21 @@
 FROM python:3.12-slim
 
+# --- Pinned tool versions (reproducible builds) ---
 ARG TRIVY_VERSION=0.74.0
 ARG HADOLINT_VERSION=2.15.1
 ARG DOCKER_CLI_VERSION=27.3.1
+
+# Host docker socket GID — pass with:
+#   --build-arg DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 ARG DOCKER_GID=999
+
+# Non-root user/group IDs
 ARG DOCKER_UID=10001
 ARG DOCKER_USER_GID=10001
 
+# --- System dependencies ---
+# docker.io is not available in Debian trixie, so the static Docker CLI binary
+# is installed below instead. gosu is used by entrypoint.sh for privilege drop.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
@@ -14,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
     && rm -rf /var/lib/apt/lists/*
 
+# --- Docker CLI (static binary, CLI only, no daemon) ---
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -29,6 +39,7 @@ RUN set -eux; \
     rm -rf /tmp/docker /tmp/docker.tgz; \
     docker --version
 
+# --- Hadolint (pinned) ---
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -40,6 +51,7 @@ RUN set -eux; \
         "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-${hadolint_arch}"; \
     chmod +x /usr/local/bin/hadolint
 
+# --- Trivy (pinned release tarball) ---
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -52,19 +64,24 @@ RUN set -eux; \
     tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy; \
     rm -f /tmp/trivy.tar.gz
 
+# Fail the build if any tool is missing or not executable
 RUN trivy --version && hadolint --version && docker --version
 
+# --- Build DockSec ---
 WORKDIR /src
 COPY . .
 RUN pip install --no-cache-dir ".[ai]"
 RUN docksec --version
 
+# Prepare workspace and clean build sources
 WORKDIR /github/workspace
 RUN rm -rf /src
 
+# --- Non-root user (single creation) ---
 RUN groupadd -g ${DOCKER_USER_GID} docksec && \
     useradd -m -u ${DOCKER_UID} -g docksec -s /sbin/nologin -c "DockSec App User" docksec
 
+# --- Docker socket group (host GID match) ---
 RUN if getent group ${DOCKER_GID} >/dev/null; then \
         existing=$(getent group ${DOCKER_GID} | cut -d: -f1); \
         usermod -aG "$existing" docksec; \
@@ -73,12 +90,18 @@ RUN if getent group ${DOCKER_GID} >/dev/null; then \
         usermod -aG docker_host docksec; \
     fi
 
+# --- DockSec results directory with correct ownership ---
 RUN mkdir -p /home/docksec/.docksec/results && \
     chown -R docksec:docksec /home/docksec/.docksec
 
+# --- Entrypoint ---
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && \
     chown docksec:docksec /entrypoint.sh && \
     chown -R docksec:docksec /github/workspace
+
+# NOTE: USER is intentionally not set. GitHub Docker container actions
+# require root to access GITHUB_WORKSPACE. Standalone runs are dropped to
+# the non-root `docksec` user by entrypoint.sh (via gosu).
 
 ENTRYPOINT ["/entrypoint.sh"]
