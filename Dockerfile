@@ -1,10 +1,5 @@
 FROM python:3.12-slim
 
-# Pinned tool versions
-ARG TRIVY_VERSION=0.74.0
-ARG HADOLINT_VERSION=2.15.1
-ARG DOCKER_CLI_VERSION=27.3.1
-
 ARG DOCKER_GID=999
 ARG DOCKER_UID=10001
 ARG DOCKER_USER_GID=10001
@@ -16,23 +11,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Docker CLI (static binary)
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-        amd64) docker_arch='x86_64' ;; \
-        arm64) docker_arch='aarch64' ;; \
-        *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /tmp/docker.tgz \
-        "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz"; \
-    tar -xzf /tmp/docker.tgz -C /tmp; \
-    mv /tmp/docker/docker /usr/local/bin/docker; \
-    chmod +x /usr/local/bin/docker; \
-    rm -rf /tmp/docker /tmp/docker.tgz; \
-    docker --version
+# Docker CLI (GPG-signed APT repository)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+        -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+        https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version
 
 # Linter install
+ARG HADOLINT_VERSION=2.15.1
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -45,6 +42,7 @@ RUN set -eux; \
     chmod +x /usr/local/bin/hadolint
 
 # Scanner install
+ARG TRIVY_VERSION=0.74.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
